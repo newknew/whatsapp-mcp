@@ -420,6 +420,48 @@ func runServeCommand() {
 	log.Println("Server stopped")
 }
 
+// runSetupCommand pairs with WhatsApp via QR code, then exits.
+func runSetupCommand() {
+	log.SetOutput(os.Stderr)
+	log.SetFlags(log.Ltime | log.Lshortfile)
+
+	ctx := context.Background()
+
+	client, err := GetClient()
+	if err != nil {
+		log.Fatalf("Failed to initialize: %v", err)
+	}
+
+	if client.IsAuthenticated(ctx) {
+		if err := client.Connect(ctx); err != nil {
+			log.Fatalf("Connection failed: %v", err)
+		}
+		phone := client.GetPhoneNumber(ctx)
+		fmt.Printf("\nAlready paired as %s\n", phone)
+		fmt.Println("\nTo re-pair, delete the session directory and run setup again:")
+		fmt.Printf("  rm -rf ~/.local/share/newknew-mcp/whatsapp/\n")
+		fmt.Printf("  whatsapp-mcp setup\n")
+		return
+	}
+
+	fmt.Println("WhatsApp MCP Setup")
+	fmt.Println("==================")
+	fmt.Println()
+	fmt.Println("Scan this QR code with WhatsApp:")
+	fmt.Println("  Phone > Settings > Linked Devices > Link a Device")
+	fmt.Println()
+
+	if err := client.RunInteractiveAuth(ctx); err != nil {
+		log.Fatalf("Pairing failed: %v", err)
+	}
+
+	phone := client.GetPhoneNumber(ctx)
+	fmt.Printf("\nPaired successfully as %s\n", phone)
+	fmt.Println()
+	fmt.Println("Start the server:")
+	fmt.Println("  whatsapp-mcp serve")
+}
+
 // registerTools adds all MCP tools to the server
 func registerTools(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
@@ -1669,6 +1711,9 @@ func main() {
 		case "serve":
 			runServeCommand()
 			return
+		case "setup":
+			runSetupCommand()
+			return
 		case "version":
 			fmt.Printf("whatsapp-mcp %s\n", version)
 			return
@@ -1678,6 +1723,7 @@ func main() {
 			fmt.Println("Usage:")
 			fmt.Println("  whatsapp-mcp          Run as stdio MCP server")
 			fmt.Println("  whatsapp-mcp serve    Run as HTTP server on port 2053")
+			fmt.Println("  whatsapp-mcp setup    Pair with WhatsApp via QR code")
 			fmt.Println("  whatsapp-mcp version  Show version")
 			fmt.Println()
 			fmt.Println("HTTP Endpoints (when running 'serve'):")
