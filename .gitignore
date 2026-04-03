@@ -1,0 +1,4 @@
+whatsapp-mcp
+*.db
+*.log
+.DS_Store
