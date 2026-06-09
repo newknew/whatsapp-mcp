@@ -1083,22 +1083,22 @@ func DownloadAttachment(ctx context.Context, req *mcp.CallToolRequest, input Dow
 
 	switch att.MediaType {
 	case "image":
-		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, int(att.FileSize), whatsmeow.MediaImage, att.MimeType)
+		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, whatsmeow.MediaImage, att.MimeType, false)
 		filename = fmt.Sprintf("image_%s.%s", input.MessageID[:8], getExtFromMime(att.MimeType, "jpg"))
 	case "video":
-		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, int(att.FileSize), whatsmeow.MediaVideo, att.MimeType)
+		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, whatsmeow.MediaVideo, att.MimeType, false)
 		filename = fmt.Sprintf("video_%s.%s", input.MessageID[:8], getExtFromMime(att.MimeType, "mp4"))
 	case "audio":
-		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, int(att.FileSize), whatsmeow.MediaAudio, att.MimeType)
+		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, whatsmeow.MediaAudio, att.MimeType, false)
 		filename = fmt.Sprintf("audio_%s.%s", input.MessageID[:8], getExtFromMime(att.MimeType, "ogg"))
 	case "document":
-		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, int(att.FileSize), whatsmeow.MediaDocument, att.MimeType)
+		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, whatsmeow.MediaDocument, att.MimeType, false)
 		filename = att.Filename
 		if filename == "" {
 			filename = fmt.Sprintf("document_%s.%s", input.MessageID[:8], getExtFromMime(att.MimeType, "bin"))
 		}
 	case "sticker":
-		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, int(att.FileSize), whatsmeow.MediaImage, att.MimeType)
+		data, err = wmClient.DownloadMediaWithPath(ctx, att.DirectPath, att.FileEncSHA256, att.FileSHA256, att.MediaKey, whatsmeow.MediaImage, att.MimeType, false)
 		filename = fmt.Sprintf("sticker_%s.%s", input.MessageID[:8], getExtFromMime(att.MimeType, "webp"))
 	default:
 		return nil, DownloadAttachmentOutput{Message: "unsupported media type: " + att.MediaType}, nil
