@@ -466,6 +466,7 @@ func runSetupCommand() {
 func registerTools(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_ping",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Check if WhatsApp MCP server is running",
 	}, Ping)
 
@@ -481,23 +482,27 @@ func registerTools(server *mcp.Server) {
 
 	server.AddTool(&mcp.Tool{
 		Name:        "whatsapp_list_chats",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "List WhatsApp chats ordered by most recent message. Returns chat JID, name, and message count. Use messages_per_chat (1-10) to include last N messages per chat. Use pending_only=true to only show chats with new messages since last dismiss.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"description":"Max chats to return (default 50)"},"messages_per_chat":{"description":"Include last N messages per chat (0-10, default 0)"},"pending_only":{"description":"Only return chats with new messages since last dismiss (true/false)"}}}`),
 	}, flexTool(ListChats))
 
 	server.AddTool(&mcp.Tool{
 		Name:        "whatsapp_get_messages",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Get messages from a specific WhatsApp chat. Use chat_jid from list_chats. Supports pagination via before_time. Omit chat_jid for cross-chat query. Filter by since_time, search (text), type (text/image/video/etc).",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"chat_jid":{"description":"Chat JID from list_chats"},"limit":{"description":"Max messages (default 50)"},"before_time":{"description":"Pagination cursor (RFC3339)"},"since_time":{"description":"Only messages after this time (RFC3339)"},"search":{"description":"Text search filter"},"type":{"description":"Message type filter (text/image/video/etc)"}}}`),
 	}, flexTool(GetMessages))
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_sync_status",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Get message sync status: total messages stored, chat count, and last sync time.",
 	}, GetSyncStatus)
 
 	server.AddTool(&mcp.Tool{
 		Name:        "whatsapp_list_attachments",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "List WhatsApp attachments (images, videos, audio, documents). Filter by chat_jid or media_type.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"chat_jid":{"description":"Filter by chat JID"},"media_type":{"description":"Filter by type (image/video/audio/document)"},"limit":{"description":"Max results (default 50)"}}}`),
 	}, flexTool(ListAttachments))
@@ -509,11 +514,13 @@ func registerTools(server *mcp.Server) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_get_contact",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Get contact info by JID. Returns name, phone number, and other details.",
 	}, GetContact)
 
 	server.AddTool(&mcp.Tool{
 		Name:        "whatsapp_search_contacts",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Search contacts by name or phone number. Returns matching contacts.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"query":{"description":"Name or phone number to search"},"limit":{"description":"Max results (default 20)"}},"required":["query"]}`),
 	}, flexTool(SearchContacts))
@@ -541,6 +548,7 @@ func registerTools(server *mcp.Server) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_get_group_info",
+		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
 		Description: "Get group metadata and participant list. Returns group name, topic, creation time, and all participants with phone numbers, names, and admin status. Requires a group JID (ending in @g.us).",
 	}, GetGroupInfo)
 }
@@ -813,10 +821,10 @@ func mergeChatGroup(chats []ChatWithMessages, canonicalJID string) ChatWithMessa
 type GetMessagesInput struct {
 	ChatJID    string `json:"chat_jid,omitempty"`    // optional - omit for cross-chat query
 	Limit      string `json:"limit,omitempty"`       // max messages (default 50, max 500 for cross-chat)
-	BeforeTime string  `json:"before_time,omitempty"` // RFC3339 - pagination: messages before this time
-	SinceTime  string  `json:"since_time,omitempty"`  // RFC3339 - filter: messages after this time
-	Search     string  `json:"search,omitempty"`      // full-text search in content
-	Type       string  `json:"type,omitempty"`        // filter by message type (text, image, etc.)
+	BeforeTime string `json:"before_time,omitempty"` // RFC3339 - pagination: messages before this time
+	SinceTime  string `json:"since_time,omitempty"`  // RFC3339 - filter: messages after this time
+	Search     string `json:"search,omitempty"`      // full-text search in content
+	Type       string `json:"type,omitempty"`        // filter by message type (text, image, etc.)
 }
 
 // GetMessagesOutput returns messages
@@ -992,8 +1000,8 @@ func PairPhone(ctx context.Context, req *mcp.CallToolRequest, input PairPhoneInp
 
 // ListAttachmentsInput for listing attachments
 type ListAttachmentsInput struct {
-	ChatJID   string  `json:"chat_jid,omitempty"`
-	MediaType string  `json:"media_type,omitempty"` // image, video, audio, document
+	ChatJID   string `json:"chat_jid,omitempty"`
+	MediaType string `json:"media_type,omitempty"` // image, video, audio, document
 	Limit     string `json:"limit,omitempty"`
 }
 
@@ -1211,7 +1219,7 @@ func GetContact(ctx context.Context, req *mcp.CallToolRequest, input GetContactI
 
 // SearchContactsInput for searching contacts
 type SearchContactsInput struct {
-	Query string  `json:"query"`
+	Query string `json:"query"`
 	Limit string `json:"limit,omitempty"`
 }
 
@@ -1285,12 +1293,12 @@ const (
 
 // SendMessageInput for sending a message
 type SendMessageInput struct {
-	Mode       string `json:"mode"`                  // "new" or "reply"
-	ChatJID    string `json:"chat_jid,omitempty"`    // required for mode=new
-	Text       string `json:"text,omitempty"`        // message content (required if no attachment)
-	ReplyTo    string `json:"reply_to,omitempty"`    // message_id for mode=reply
-	MarkRead   *string `json:"mark_read,omitempty"`   // auto-mark chat as read after send (default: true)
-	Attachment string `json:"attachment,omitempty"`   // file path (optional)
+	Mode       string  `json:"mode"`                 // "new" or "reply"
+	ChatJID    string  `json:"chat_jid,omitempty"`   // required for mode=new
+	Text       string  `json:"text,omitempty"`       // message content (required if no attachment)
+	ReplyTo    string  `json:"reply_to,omitempty"`   // message_id for mode=reply
+	MarkRead   *string `json:"mark_read,omitempty"`  // auto-mark chat as read after send (default: true)
+	Attachment string  `json:"attachment,omitempty"` // file path (optional)
 }
 
 // SendMessageOutput returns the sent message info
