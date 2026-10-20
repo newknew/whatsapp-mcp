@@ -9,7 +9,15 @@ MCP server for WhatsApp messaging via [whatsmeow](https://github.com/tulir/whats
 - Search messages
 - Download attachments
 - Read receipts and dismiss tracking
-- Group info and management
+- Group info, member lists, invite link lookup
+- Find groups by name or member
+
+## Groups
+
+- Names and members sync on connect and on group events
+- `whatsapp_list_chats` takes `query` and `participant`
+- `whatsapp_get_group_info` takes `chat_jid` or `invite_link`
+- Live lookups are rate-limited by WhatsApp; cache fills in
 
 ## Prerequisites
 

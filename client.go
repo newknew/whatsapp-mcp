@@ -591,28 +591,7 @@ func (c *Client) SyncContactsFromWhatsmeow(ctx context.Context) (int, error) {
 // ResolveToPhoneJID converts a LID JID to its phone-based JID if possible.
 // Returns the original JID if no mapping exists or if it's already phone-based.
 func (c *Client) ResolveToPhoneJID(ctx context.Context, jid string) string {
-	if c.client == nil || c.client.Store == nil || c.client.Store.LIDs == nil {
-		return jid
-	}
-
-	// Parse the JID
-	parsed, err := types.ParseJID(jid)
-	if err != nil {
-		return jid
-	}
-
-	// Only resolve LID JIDs
-	if parsed.Server != "lid" {
-		return jid // Already phone-based or other type
-	}
-
-	// Try to get phone JID from LID store
-	phoneJID, err := c.client.Store.LIDs.GetPNForLID(ctx, parsed)
-	if err != nil || phoneJID.IsEmpty() {
-		return jid // No mapping found
-	}
-
-	return phoneJID.String()
+	return resolvePhoneJID(ctx, c.client, jid)
 }
 
 // GetAllLIDMappings returns all known LID→phone mappings for a set of JIDs.
@@ -1114,6 +1093,7 @@ type GroupInfoResult struct {
 	Created          time.Time         `json:"created"`
 	ParticipantCount int               `json:"participant_count"`
 	Participants     []ParticipantInfo `json:"participants"`
+	Source           string            `json:"source"` // live, cache, invite_link
 	Found            bool              `json:"found"`
 }
 
@@ -1126,73 +1106,90 @@ type ParticipantInfo struct {
 	IsSuperAdmin bool   `json:"is_super_admin"`
 }
 
-// GetGroupInfo fetches live group metadata and participants from WhatsApp servers
-func (c *Client) GetGroupInfo(ctx context.Context, jid string) (*GroupInfoResult, error) {
-	if c.client == nil {
-		return nil, fmt.Errorf("client not connected")
+// groupResult converts whatsmeow group info into a GroupInfoResult
+func (c *Client) groupResult(ctx context.Context, info *types.GroupInfo, source string) *GroupInfoResult {
+	participants := buildParticipants(ctx, c.client, c.msgStore, info)
+	return &GroupInfoResult{
+		JID:              info.JID.String(),
+		Name:             info.GroupName.Name,
+		Topic:            info.GroupTopic.Topic,
+		Created:          info.GroupCreated,
+		ParticipantCount: len(participants),
+		Participants:     participants,
+		Source:           source,
+		Found:            true,
 	}
+}
 
-	// Parse and validate JID
+// GetGroupInfo fetches live group metadata and participants from WhatsApp
+// servers, caching the result. Falls back to the local cache when the
+// server refuses (rate limit, left group, offline).
+func (c *Client) GetGroupInfo(ctx context.Context, jid string) (*GroupInfoResult, error) {
 	parsedJID, err := types.ParseJID(jid)
 	if err != nil {
 		return nil, fmt.Errorf("invalid JID: %w", err)
 	}
-
 	if parsedJID.Server != types.GroupServer {
 		return nil, fmt.Errorf("not a group JID (must end with @g.us): %s", jid)
 	}
 
-	// Fetch live group info from WhatsApp servers
-	groupInfo, err := c.client.GetGroupInfo(ctx, parsedJID)
-	if err != nil {
-		return nil, fmt.Errorf("get group info: %w", err)
-	}
-
-	// Build participant list with resolved names
-	participants := make([]ParticipantInfo, 0, len(groupInfo.Participants))
-	for _, p := range groupInfo.Participants {
-		participantJID := p.JID.String()
-
-		// Resolve LID JID to phone JID if possible
-		phoneJID := c.ResolveToPhoneJID(ctx, participantJID)
-
-		info := ParticipantInfo{
-			JID:          phoneJID,
-			IsAdmin:      p.IsAdmin,
-			IsSuperAdmin: p.IsSuperAdmin,
-		}
-
-		// Extract phone number from resolved JID
-		parsedPhone, err := types.ParseJID(phoneJID)
-		if err == nil && parsedPhone.Server == "s.whatsapp.net" && parsedPhone.User != "" {
-			info.PhoneNumber = "+" + parsedPhone.User
-		}
-
-		// Resolve name from contacts table (try both original and resolved JID)
-		if c.msgStore != nil {
-			info.Name = c.msgStore.GetContactName(ctx, phoneJID)
-			if info.Name == "" && phoneJID != participantJID {
-				info.Name = c.msgStore.GetContactName(ctx, participantJID)
+	var liveErr error
+	if c.client != nil {
+		info, err := c.client.GetGroupInfo(ctx, parsedJID)
+		if err == nil {
+			if c.msgStore != nil {
+				h := NewEventHandler(c.client, c.msgStore)
+				if err := h.storeGroup(ctx, info); err != nil {
+					logToFile("client", "Error caching group %s: %v", jid, err)
+				}
 			}
+			return c.groupResult(ctx, info, "live"), nil
 		}
-
-		// Fall back to display name from group metadata
-		if info.Name == "" && p.DisplayName != "" {
-			info.Name = p.DisplayName
-		}
-
-		participants = append(participants, info)
+		liveErr = err
+	} else {
+		liveErr = fmt.Errorf("client not connected")
 	}
 
+	if c.msgStore == nil {
+		return nil, fmt.Errorf("get group info: %w", liveErr)
+	}
+	participants, err := c.msgStore.GetGroupParticipants(ctx, jid)
+	if err != nil || len(participants) == 0 {
+		return nil, fmt.Errorf("get group info: %w (no cached participants)", liveErr)
+	}
 	return &GroupInfoResult{
-		JID:              groupInfo.JID.String(),
-		Name:             groupInfo.GroupName.Name,
-		Topic:            groupInfo.GroupTopic.Topic,
-		Created:          groupInfo.GroupCreated,
+		JID:              jid,
+		Name:             c.msgStore.GetGroupName(ctx, jid),
 		ParticipantCount: len(participants),
 		Participants:     participants,
+		Source:           "cache",
 		Found:            true,
 	}, nil
+}
+
+// ResolveInviteLink looks up the group behind a chat.whatsapp.com invite
+// link without joining it
+func (c *Client) ResolveInviteLink(ctx context.Context, link string) (*GroupInfoResult, error) {
+	if c.client == nil {
+		return nil, fmt.Errorf("client not connected")
+	}
+	code, err := parseInviteCode(link)
+	if err != nil {
+		return nil, err
+	}
+	info, err := c.client.GetGroupInfoFromLink(ctx, code)
+	if err != nil {
+		return nil, fmt.Errorf("resolve invite link: %w", err)
+	}
+	return c.groupResult(ctx, info, "invite_link"), nil
+}
+
+// SyncGroups refreshes the cached name and member list of every joined group
+func (c *Client) SyncGroups(ctx context.Context) (int, error) {
+	if c.client == nil || c.msgStore == nil {
+		return 0, fmt.Errorf("client not connected")
+	}
+	return NewEventHandler(c.client, c.msgStore).syncGroups(ctx, true)
 }
 
 func init() {

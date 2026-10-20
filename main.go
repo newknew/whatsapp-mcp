@@ -483,8 +483,8 @@ func registerTools(server *mcp.Server) {
 	server.AddTool(&mcp.Tool{
 		Name:        "whatsapp_list_chats",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-		Description: "List WhatsApp chats ordered by most recent message. Returns chat JID, name, and message count. Use messages_per_chat (1-10) to include last N messages per chat. Use pending_only=true to only show chats with new messages since last dismiss.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"description":"Max chats to return (default 50)"},"messages_per_chat":{"description":"Include last N messages per chat (0-10, default 0)"},"pending_only":{"description":"Only return chats with new messages since last dismiss (true/false)"}}}`),
+		Description: "List WhatsApp chats ordered by most recent message. Returns chat JID, name, and message count. Use messages_per_chat (1-10) to include last N messages per chat. Use pending_only=true to only show chats with new messages since last dismiss. Use query to search by chat name, contact name, or JID. Use participant (phone number, JID, or name) to find groups containing a person.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"limit":{"description":"Max chats to return (default 50)"},"messages_per_chat":{"description":"Include last N messages per chat (0-10, default 0)"},"pending_only":{"description":"Only return chats with new messages since last dismiss (true/false)"},"query":{"description":"Substring match on chat name, contact name, or JID"},"participant":{"description":"Find groups containing this member: phone number, JID, or name substring"}}}`),
 	}, flexTool(ListChats))
 
 	server.AddTool(&mcp.Tool{
@@ -549,7 +549,7 @@ func registerTools(server *mcp.Server) {
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_get_group_info",
 		Annotations: &mcp.ToolAnnotations{ReadOnlyHint: true},
-		Description: "Get group metadata and participant list. Returns group name, topic, creation time, and all participants with phone numbers, names, and admin status. Requires a group JID (ending in @g.us).",
+		Description: "Get group metadata and participant list. Returns group name, topic, creation time, and all participants with phone numbers, names, and admin status. Pass chat_jid (group JID ending in @g.us) or invite_link (chat.whatsapp.com/... link, resolved without joining). Falls back to the local cache (source=cache) if WhatsApp rate-limits the live lookup; avoid calling it for many groups at once — use whatsapp_list_chats with query/participant to find a group instead.",
 	}, GetGroupInfo)
 }
 
@@ -646,6 +646,8 @@ type ListChatsInput struct {
 	Limit           string `json:"limit,omitempty"`
 	MessagesPerChat string `json:"messages_per_chat,omitempty"` // 0 = no messages, 1-10 = include last N messages per chat
 	PendingOnly     string `json:"pending_only,omitempty"`      // only return chats with new messages since last dismiss
+	Query           string `json:"query,omitempty"`             // substring match on chat name, contact name, or JID
+	Participant     string `json:"participant,omitempty"`       // group member: phone number, JID, or name
 }
 
 // ListChatsOutput returns chats (with optional messages)
@@ -676,7 +678,7 @@ func ListChats(ctx context.Context, req *mcp.CallToolRequest, input ListChatsInp
 	}
 
 	// Use GetChatsWithMessages which returns canonical_jid as JID
-	chats, err := store.GetChatsWithMessages(ctx, limit, parseIntParam(input.MessagesPerChat, 0))
+	chats, err := store.GetChatsWithMessages(ctx, limit, parseIntParam(input.MessagesPerChat, 0), ChatFilter{Query: input.Query, Participant: input.Participant})
 	if err != nil {
 		return nil, ListChatsOutput{}, fmt.Errorf("get chats: %w", err)
 	}
@@ -1652,7 +1654,8 @@ func UndismissChat(ctx context.Context, req *mcp.CallToolRequest, input Undismis
 
 // GetGroupInfoInput for getting group info
 type GetGroupInfoInput struct {
-	ChatJID string `json:"chat_jid"` // required: group JID (must end with @g.us)
+	ChatJID    string `json:"chat_jid,omitempty"`    // group JID (must end with @g.us)
+	InviteLink string `json:"invite_link,omitempty"` // alternative: chat.whatsapp.com invite link or code
 }
 
 // GetGroupInfoOutput returns group metadata and participants
@@ -1663,48 +1666,55 @@ type GetGroupInfoOutput struct {
 	Created          string            `json:"created,omitempty"`
 	ParticipantCount int               `json:"participant_count"`
 	Participants     []ParticipantInfo `json:"participants"`
+	Source           string            `json:"source,omitempty"` // live, cache, invite_link
 	Found            bool              `json:"found"`
 	Message          string            `json:"message,omitempty"`
 }
 
+// groupInfoError builds a not-found result with a non-nil participant list
+func groupInfoError(msg string) GetGroupInfoOutput {
+	return GetGroupInfoOutput{Found: false, Message: msg, Participants: []ParticipantInfo{}}
+}
+
 // GetGroupInfo retrieves group metadata and participant list
 func GetGroupInfo(ctx context.Context, req *mcp.CallToolRequest, input GetGroupInfoInput) (*mcp.CallToolResult, GetGroupInfoOutput, error) {
-	if input.ChatJID == "" {
-		return nil, GetGroupInfoOutput{
-			Found:   false,
-			Message: "chat_jid is required (must be a group JID ending with @g.us)",
-		}, nil
+	if input.ChatJID == "" && input.InviteLink == "" {
+		return nil, groupInfoError("chat_jid (group JID ending with @g.us) or invite_link is required"), nil
 	}
 
 	client, err := GetClient()
 	if err != nil {
-		return nil, GetGroupInfoOutput{
-			Found:   false,
-			Message: err.Error(),
-		}, nil
+		return nil, groupInfoError(err.Error()), nil
 	}
 
-	result, err := client.GetGroupInfo(ctx, input.ChatJID)
+	var result *GroupInfoResult
+	if input.ChatJID != "" {
+		result, err = client.GetGroupInfo(ctx, input.ChatJID)
+	} else {
+		result, err = client.ResolveInviteLink(ctx, input.InviteLink)
+	}
 	if err != nil {
-		return nil, GetGroupInfoOutput{
-			Found:   false,
-			Message: err.Error(),
-		}, nil
+		return nil, groupInfoError(err.Error()), nil
 	}
 
-	// Ensure non-nil slice for JSON serialization
 	participants := result.Participants
 	if participants == nil {
 		participants = []ParticipantInfo{}
+	}
+
+	created := ""
+	if !result.Created.IsZero() {
+		created = result.Created.Format(time.RFC3339)
 	}
 
 	return nil, GetGroupInfoOutput{
 		JID:              result.JID,
 		Name:             result.Name,
 		Topic:            result.Topic,
-		Created:          result.Created.Format(time.RFC3339),
+		Created:          created,
 		ParticipantCount: result.ParticipantCount,
 		Participants:     participants,
+		Source:           result.Source,
 		Found:            true,
 	}, nil
 }

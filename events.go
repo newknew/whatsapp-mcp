@@ -17,28 +17,7 @@ import (
 // resolveToPhoneJID converts a LID JID to its phone-based JID if possible.
 // Returns the original JID if no mapping exists or if it's already phone-based.
 func (h *EventHandler) resolveToPhoneJID(ctx context.Context, jid string) string {
-	if h.client == nil || h.client.Store == nil || h.client.Store.LIDs == nil {
-		return jid
-	}
-
-	// Parse the JID
-	parsed, err := types.ParseJID(jid)
-	if err != nil {
-		return jid
-	}
-
-	// Only resolve LID JIDs
-	if parsed.Server != "lid" {
-		return jid // Already phone-based or other type
-	}
-
-	// Try to get phone JID from LID store
-	phoneJID, err := h.client.Store.LIDs.GetPNForLID(ctx, parsed)
-	if err != nil || phoneJID.IsEmpty() {
-		return jid // No mapping found
-	}
-
-	return phoneJID.String()
+	return resolvePhoneJID(ctx, h.client, jid)
 }
 
 // EventHandler processes WhatsApp events and stores messages
@@ -75,6 +54,12 @@ func (h *EventHandler) handleEvent(evt interface{}) {
 		h.handleContact(v)
 	case *events.PushName:
 		h.handlePushName(v)
+	case *events.Connected:
+		go h.syncGroups(context.Background(), false)
+	case *events.JoinedGroup:
+		h.handleJoinedGroup(v)
+	case *events.GroupInfo:
+		h.handleGroupInfo(v)
 	}
 }
 

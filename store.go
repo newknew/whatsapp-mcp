@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/encoding/protojson"
 	_ "modernc.org/sqlite"
 )
@@ -174,6 +175,19 @@ func (s *MessageStore) init() error {
 		updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now'))
 	);
 
+	CREATE TABLE IF NOT EXISTS group_participants (
+		group_jid TEXT NOT NULL,
+		jid TEXT NOT NULL,
+		phone_jid TEXT,
+		name TEXT,
+		is_admin INTEGER NOT NULL DEFAULT 0,
+		is_super_admin INTEGER NOT NULL DEFAULT 0,
+		updated_at INTEGER NOT NULL DEFAULT (strftime('%s', 'now')),
+		PRIMARY KEY (group_jid, jid)
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_group_participants_phone ON group_participants(phone_jid);
+
 	CREATE INDEX IF NOT EXISTS idx_contacts_name ON contacts(full_name);
 	CREATE INDEX IF NOT EXISTS idx_contacts_push_name ON contacts(push_name);
 	CREATE INDEX IF NOT EXISTS idx_contacts_phone ON contacts(phone_number);
@@ -265,6 +279,10 @@ func (s *MessageStore) RunMigrations(ctx context.Context) {
 		s.SetSyncState(ctx, "migration_backfill_user_handled_at",
 			time.Now().Format(time.RFC3339))
 	}
+
+	// Repair: chats first seen via real-time messages were stored with
+	// is_group=0 regardless of JID. Idempotent, so run every startup.
+	s.db.ExecContext(ctx, `UPDATE chats SET is_group = 1 WHERE jid LIKE '%@g.us' AND is_group = 0`)
 
 	// One-time backfill: populate FTS5 index from existing messages
 	val, _ = s.GetSyncState(ctx, "migration_fts5_backfill")
@@ -382,13 +400,14 @@ func (s *MessageStore) StoreMessage(ctx context.Context, msg *Message) error {
 	// Update chat's last message time (use canonical_jid for the chat)
 	err = retryOnBusy(ctx, 5, func() error {
 		_, err := s.db.ExecContext(ctx, `
-			INSERT INTO chats (jid, canonical_jid, last_message_time)
-			VALUES (?, ?, ?)
+			INSERT INTO chats (jid, canonical_jid, is_group, last_message_time)
+			VALUES (?, ?, ?, ?)
 			ON CONFLICT(jid) DO UPDATE SET
 				last_message_time = MAX(last_message_time, excluded.last_message_time),
 				canonical_jid = COALESCE(excluded.canonical_jid, canonical_jid),
+				is_group = MAX(is_group, excluded.is_group),
 				updated_at = strftime('%s', 'now')
-		`, canonicalJID, canonicalJID, msg.Timestamp.Unix())
+		`, canonicalJID, canonicalJID, isGroupJID(canonicalJID), msg.Timestamp.Unix())
 		return err
 	})
 
@@ -417,6 +436,126 @@ func (s *MessageStore) UpdateChat(ctx context.Context, chat *Chat) error {
 		`, chat.JID, canonicalJID, chat.Name, chat.IsGroup, chat.LastMessageTime.Unix(), chat.RawProto)
 		return err
 	})
+}
+
+// ChatFilter narrows a chat listing by name or participant
+type ChatFilter struct {
+	Query       string // substring match on chat name, contact name, or JID
+	Participant string // group member: phone number, JID, or name substring
+}
+
+// sql returns extra WHERE clauses (prefixed with AND) and their args
+func (f ChatFilter) sql() (string, []interface{}) {
+	var where string
+	var args []interface{}
+
+	if q := strings.TrimSpace(f.Query); q != "" {
+		like := "%" + q + "%"
+		where += ` AND (c.name LIKE ? OR cont.full_name LIKE ? OR cont.first_name LIKE ?
+			OR cont.push_name LIKE ? OR c.canonical_jid LIKE ? OR c.jid LIKE ?)`
+		args = append(args, like, like, like, like, like, like)
+	}
+
+	if p := normalizeParticipantQuery(f.Participant); p != "" {
+		like := "%" + p + "%"
+		where += ` AND (c.canonical_jid LIKE ? OR cont.full_name LIKE ? OR cont.push_name LIKE ?
+			OR EXISTS (
+				SELECT 1 FROM group_participants gp
+				LEFT JOIN contacts pc ON pc.jid = gp.phone_jid
+				WHERE gp.group_jid = c.canonical_jid
+					AND (gp.jid LIKE ? OR gp.phone_jid LIKE ? OR gp.name LIKE ?
+						OR pc.full_name LIKE ? OR pc.push_name LIKE ?)
+			))`
+		args = append(args, like, like, like, like, like, like, like, like)
+	}
+
+	return where, args
+}
+
+// normalizeParticipantQuery strips phone formatting so "+1 (408) 621-1426"
+// matches the digits stored in JIDs; names pass through trimmed
+func normalizeParticipantQuery(q string) string {
+	q = strings.TrimSpace(q)
+	if q == "" {
+		return ""
+	}
+	digits := strings.NewReplacer("+", "", " ", "", "-", "", "(", "", ")", "", ".", "").Replace(q)
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			return q
+		}
+	}
+	return digits
+}
+
+// ReplaceGroupParticipants overwrites the cached member list of a group
+func (s *MessageStore) ReplaceGroupParticipants(ctx context.Context, groupJID string, parts []ParticipantInfo) error {
+	return retryOnBusy(ctx, 5, func() error {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+
+		if _, err := tx.ExecContext(ctx, `DELETE FROM group_participants WHERE group_jid = ?`, groupJID); err != nil {
+			return err
+		}
+		for _, p := range parts {
+			phoneJID := p.JID
+			if !strings.HasSuffix(phoneJID, "@s.whatsapp.net") {
+				phoneJID = ""
+			}
+			_, err := tx.ExecContext(ctx, `
+				INSERT INTO group_participants (group_jid, jid, phone_jid, name, is_admin, is_super_admin)
+				VALUES (?, ?, ?, ?, ?, ?)
+				ON CONFLICT(group_jid, jid) DO UPDATE SET
+					phone_jid = excluded.phone_jid,
+					name = excluded.name,
+					is_admin = excluded.is_admin,
+					is_super_admin = excluded.is_super_admin,
+					updated_at = strftime('%s', 'now')
+			`, groupJID, p.JID, phoneJID, p.Name, p.IsAdmin, p.IsSuperAdmin)
+			if err != nil {
+				return err
+			}
+		}
+		return tx.Commit()
+	})
+}
+
+// GetGroupParticipants returns the cached member list of a group
+func (s *MessageStore) GetGroupParticipants(ctx context.Context, groupJID string) ([]ParticipantInfo, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT jid, phone_jid, name, is_admin, is_super_admin
+		FROM group_participants WHERE group_jid = ?
+		ORDER BY is_super_admin DESC, is_admin DESC, name
+	`, groupJID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	parts := []ParticipantInfo{}
+	for rows.Next() {
+		var p ParticipantInfo
+		var phoneJID, name sql.NullString
+		if err := rows.Scan(&p.JID, &phoneJID, &name, &p.IsAdmin, &p.IsSuperAdmin); err != nil {
+			return nil, err
+		}
+		p.Name = name.String
+		if parsed, err := types.ParseJID(phoneJID.String); err == nil && parsed.User != "" {
+			p.PhoneNumber = "+" + parsed.User
+		}
+		parts = append(parts, p)
+	}
+	return parts, rows.Err()
+}
+
+// GetGroupName returns the cached name of a chat, or ""
+func (s *MessageStore) GetGroupName(ctx context.Context, groupJID string) string {
+	var name sql.NullString
+	s.db.QueryRowContext(ctx, `SELECT name FROM chats WHERE jid = ?`, groupJID).Scan(&name)
+	return name.String
 }
 
 // ChatWithMessages represents a chat with its recent messages
@@ -483,7 +622,7 @@ func (s *MessageStore) GetChats(ctx context.Context, limit int) ([]Chat, error) 
 
 // GetChatsWithMessages returns chats with their last N messages each
 // Uses canonical_jid for grouping to correctly count messages and unread across JID aliases
-func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, messagesPerChat int) ([]ChatWithMessages, error) {
+func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, messagesPerChat int, filter ChatFilter) ([]ChatWithMessages, error) {
 	if limit <= 0 {
 		limit = 50
 	}
@@ -493,6 +632,9 @@ func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, mess
 	if messagesPerChat > 10 {
 		messagesPerChat = 10 // cap to prevent abuse
 	}
+
+	where, args := filter.sql()
+	args = append(args, limit)
 
 	// First get the chats - using canonical_jid for consistent counting
 	chatRows, err := s.db.QueryContext(ctx, `
@@ -512,10 +654,10 @@ func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, mess
 			c.user_handled_at
 		FROM chats c
 		LEFT JOIN contacts cont ON c.canonical_jid = cont.jid
-		WHERE c.last_message_time IS NOT NULL
+		WHERE c.last_message_time IS NOT NULL`+where+`
 		ORDER BY c.last_message_time DESC
 		LIMIT ?
-	`, limit)
+	`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -562,12 +704,12 @@ func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, mess
 	// Now get the last N messages for each chat using window function
 	// Query by canonical_jid to get all messages regardless of original JID
 	placeholders := make([]string, len(canonicalJIDs))
-	args := make([]interface{}, len(canonicalJIDs)+1)
+	msgArgs := make([]interface{}, len(canonicalJIDs)+1)
 	for i, jid := range canonicalJIDs {
 		placeholders[i] = "?"
-		args[i] = jid
+		msgArgs[i] = jid
 	}
-	args[len(canonicalJIDs)] = messagesPerChat
+	msgArgs[len(canonicalJIDs)] = messagesPerChat
 
 	query := `
 		WITH ranked AS (
@@ -582,7 +724,7 @@ func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, mess
 		ORDER BY canonical_jid, timestamp DESC
 	`
 
-	msgRows, err := s.db.QueryContext(ctx, query, args...)
+	msgRows, err := s.db.QueryContext(ctx, query, msgArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("query messages: %w", err)
 	}
