@@ -70,6 +70,20 @@ func normalizeArgs(raw json.RawMessage) json.RawMessage {
 			m[k] = strconv.FormatFloat(v, 'f', -1, 64)
 		case bool:
 			m[k] = strconv.FormatBool(v)
+		case []any:
+			// Lists flatten to the comma-separated form the handlers parse
+			parts := make([]string, 0, len(v))
+			for _, item := range v {
+				switch item := item.(type) {
+				case string:
+					parts = append(parts, item)
+				case float64:
+					parts = append(parts, strconv.FormatFloat(item, 'f', -1, 64))
+				case bool:
+					parts = append(parts, strconv.FormatBool(item))
+				}
+			}
+			m[k] = strings.Join(parts, ",")
 		}
 	}
 	b, _ := json.Marshal(m)
@@ -529,7 +543,7 @@ func registerTools(server *mcp.Server) {
 	server.AddTool(&mcp.Tool{
 		Name:        "whatsapp_send",
 		Description: "Send a WhatsApp message with optional media attachment. Use mode='new' for new messages (requires chat_jid), mode='reply' to reply (requires reply_to message_id). Use 'attachment' with a file path to send media. At least one of 'text' or 'attachment' required. Non-JPEG/PNG images are auto-converted to JPEG before sending. Text becomes caption when sent with media. To tag group members, write @<phone digits> in the text (e.g. '@33615741435') and list the same people in 'mentions'; the server converts them to real WhatsApp mentions and the result echoes who was tagged.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"mode":{"description":"'new' or 'reply'"},"chat_jid":{"description":"Required for mode=new"},"text":{"description":"Message content"},"reply_to":{"description":"Message ID for mode=reply"},"mark_read":{"description":"Auto-mark as read after send (default true)"},"attachment":{"description":"File path to send as media"},"mentions":{"description":"Comma-separated phone numbers or JIDs to tag; each must appear in text as @<digits>"}},"required":["mode"]}`),
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"mode":{"description":"'new' or 'reply'"},"chat_jid":{"description":"Required for mode=new"},"text":{"description":"Message content"},"reply_to":{"description":"Message ID for mode=reply"},"mark_read":{"description":"Auto-mark as read after send (default true)"},"attachment":{"description":"File path to send as media"},"mentions":{"description":"Phone numbers or JIDs to tag, as a list or comma-separated string; each must appear in text as @<digits>"}},"required":["mode"]}`),
 	}, flexTool(SendMessage))
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -549,12 +563,12 @@ func registerTools(server *mcp.Server) {
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_create_group",
-		Description: "Create a WhatsApp group. Requires name; participants is a comma-separated list of phone numbers (any formatting) or JIDs. You are added automatically. Optional topic (description) and icon (image file path). Members whose privacy settings block adding are reported with ok=false; send them the returned invite_link instead.",
+		Description: "Create a WhatsApp group. Requires name; participants is a list (or comma-separated string) of phone numbers (any formatting) or JIDs. You are added automatically. Optional topic (description) and icon (image file path). Members whose privacy settings block adding are reported with ok=false; send them the returned invite_link instead.",
 	}, CreateGroup)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_group_members",
-		Description: "Add, remove, promote, or demote members of a WhatsApp group you admin. action is add/remove/promote/demote; participants is a comma-separated list of phone numbers or JIDs. Returns a per-participant result; for failed adds, send the returned invite_link to the person.",
+		Description: "Add, remove, promote, or demote members of a WhatsApp group you admin. action is add/remove/promote/demote; participants is a list (or comma-separated string) of phone numbers or JIDs. Returns a per-participant result; for failed adds, send the returned invite_link to the person.",
 	}, GroupMembers)
 
 	mcp.AddTool(server, &mcp.Tool{

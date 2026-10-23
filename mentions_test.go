@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -112,4 +113,26 @@ func TestStoreReturnsMentions(t *testing.T) {
 		t.Fatalf("GetChatsWithMessages: %v %d", err, len(chats))
 	}
 	check("GetChatsWithMessages", chats[0].Messages, nil)
+}
+
+// List-valued arguments are accepted for comma-separated string fields,
+// so mentions=["a","b"] works as well as mentions="a,b".
+func TestNormalizeArgsFlattensLists(t *testing.T) {
+	raw := json.RawMessage(`{"mentions":["14086211426","+33 6 15 74 14 35"],"participants":[14086211426],"text":"hi","limit":5}`)
+	var got struct {
+		Mentions     string `json:"mentions"`
+		Participants string `json:"participants"`
+		Text         string `json:"text"`
+		Limit        string `json:"limit"`
+	}
+	if err := json.Unmarshal(normalizeArgs(raw), &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Mentions != "14086211426,+33 6 15 74 14 35" || got.Participants != "14086211426" || got.Text != "hi" || got.Limit != "5" {
+		t.Errorf("got %+v", got)
+	}
+	jids, err := parseParticipantJIDs(got.Mentions)
+	if err != nil || len(jids) != 2 || jids[1].String() != "33615741435@s.whatsapp.net" {
+		t.Errorf("parse flattened list: %v %v", jids, err)
+	}
 }
