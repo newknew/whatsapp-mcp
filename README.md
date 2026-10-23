@@ -17,6 +17,10 @@ MCP server for WhatsApp messaging via [whatsmeow](https://github.com/tulir/whats
 - Names and members sync on connect and on group events
 - `whatsapp_list_chats` takes `query` and `participant`
 - `whatsapp_get_group_info` takes `chat_jid` or `invite_link`
+- `whatsapp_create_group`: name, participants, topic, icon
+- `whatsapp_group_members`: add, remove, promote, demote
+- `whatsapp_update_group`: rename, set topic, set icon
+- Members blocked by privacy settings get an invite link
 - Live lookups are rate-limited by WhatsApp; cache fills in
 
 ## Prerequisites

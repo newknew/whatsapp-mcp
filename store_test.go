@@ -156,3 +156,24 @@ func TestParseInviteCode(t *testing.T) {
 		}
 	}
 }
+
+func TestParseParticipantJIDs(t *testing.T) {
+	got, err := parseParticipantJIDs("+1 (408) 621-1426, 33615741435@s.whatsapp.net\n260305183576222@lid")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"14086211426@s.whatsapp.net", "33615741435@s.whatsapp.net", "260305183576222@lid"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i].String() != want[i] {
+			t.Errorf("[%d] got %s, want %s", i, got[i], want[i])
+		}
+	}
+	for _, bad := range []string{"", "bob", "123", "x@g.us"} {
+		if _, err := parseParticipantJIDs(bad); err == nil {
+			t.Errorf("%q: expected error", bad)
+		}
+	}
+}

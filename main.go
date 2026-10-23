@@ -34,6 +34,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/encoding/protojson"
 )
 
@@ -545,6 +546,21 @@ func registerTools(server *mcp.Server) {
 		Name:        "whatsapp_undismiss",
 		Description: "Undismiss a chat, making it reappear in pending_only queries even without new messages. Undoes a previous whatsapp_dismiss.",
 	}, UndismissChat)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "whatsapp_create_group",
+		Description: "Create a WhatsApp group. Requires name; participants is a comma-separated list of phone numbers (any formatting) or JIDs. You are added automatically. Optional topic (description) and icon (image file path). Members whose privacy settings block adding are reported with ok=false; send them the returned invite_link instead.",
+	}, CreateGroup)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "whatsapp_group_members",
+		Description: "Add, remove, promote, or demote members of a WhatsApp group you admin. action is add/remove/promote/demote; participants is a comma-separated list of phone numbers or JIDs. Returns a per-participant result; for failed adds, send the returned invite_link to the person.",
+	}, GroupMembers)
+
+	mcp.AddTool(server, &mcp.Tool{
+		Name:        "whatsapp_update_group",
+		Description: "Change a WhatsApp group's name (subject), topic (description), or icon (image file path; auto-converted to JPEG; 'none' removes it). Give chat_jid plus at least one field.",
+	}, UpdateGroup)
 
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "whatsapp_get_group_info",
@@ -1717,6 +1733,168 @@ func GetGroupInfo(ctx context.Context, req *mcp.CallToolRequest, input GetGroupI
 		Source:           result.Source,
 		Found:            true,
 	}, nil
+}
+
+// CreateGroupInput for creating a group
+type CreateGroupInput struct {
+	Name         string `json:"name"`                   // required: group subject
+	Participants string `json:"participants,omitempty"` // comma-separated phone numbers or JIDs
+	Topic        string `json:"topic,omitempty"`        // group description
+	Icon         string `json:"icon,omitempty"`         // image file path
+}
+
+// CreateGroupOutput reports the new group and per-member outcomes
+type CreateGroupOutput struct {
+	Success    bool                `json:"success"`
+	JID        string              `json:"jid,omitempty"`
+	Name       string              `json:"name,omitempty"`
+	Members    []ParticipantResult `json:"members"`
+	InviteLink string              `json:"invite_link,omitempty"`
+	Message    string              `json:"message,omitempty"`
+}
+
+// CreateGroup creates a group, then applies optional topic and icon
+func CreateGroup(ctx context.Context, req *mcp.CallToolRequest, input CreateGroupInput) (*mcp.CallToolResult, CreateGroupOutput, error) {
+	fail := func(msg string) CreateGroupOutput {
+		return CreateGroupOutput{Success: false, Members: []ParticipantResult{}, Message: msg}
+	}
+	if strings.TrimSpace(input.Name) == "" {
+		return nil, fail("name is required"), nil
+	}
+	var participants []types.JID
+	if strings.TrimSpace(input.Participants) != "" {
+		var err error
+		if participants, err = parseParticipantJIDs(input.Participants); err != nil {
+			return nil, fail(err.Error()), nil
+		}
+	}
+	client, err := GetClient()
+	if err != nil {
+		return nil, fail(err.Error()), nil
+	}
+
+	group, members, err := client.CreateGroup(ctx, input.Name, participants)
+	if err != nil {
+		return nil, fail(err.Error()), nil
+	}
+	out := CreateGroupOutput{Success: true, JID: group.JID, Name: group.Name, Members: members}
+
+	var notes []string
+	if input.Topic != "" || input.Icon != "" {
+		upd := GroupMetaUpdate{Topic: input.Topic, IconPath: input.Icon}
+		if _, _, err := client.UpdateGroupMeta(ctx, group.JID, upd); err != nil {
+			notes = append(notes, "group created but "+err.Error())
+		}
+	}
+	if failed := countFailed(members); failed > 0 {
+		notes = append(notes, fmt.Sprintf("%d member(s) could not be added", failed))
+		out.InviteLink = client.GetInviteLink(ctx, mustGroupJID(group.JID))
+	}
+	out.Message = strings.Join(notes, "; ")
+	return nil, out, nil
+}
+
+// GroupMembersInput for membership changes
+type GroupMembersInput struct {
+	ChatJID      string `json:"chat_jid"`     // required: group JID
+	Action       string `json:"action"`       // add, remove, promote, demote
+	Participants string `json:"participants"` // comma-separated phone numbers or JIDs
+}
+
+// GroupMembersOutput reports per-participant outcomes. Success is false
+// if any participant failed; see results for details.
+type GroupMembersOutput struct {
+	Success          bool                `json:"success"`
+	Action           string              `json:"action,omitempty"`
+	Results          []ParticipantResult `json:"results"`
+	ParticipantCount int                 `json:"participant_count,omitempty"`
+	InviteLink       string              `json:"invite_link,omitempty"`
+	Message          string              `json:"message,omitempty"`
+}
+
+// GroupMembers adds, removes, promotes, or demotes group members
+func GroupMembers(ctx context.Context, req *mcp.CallToolRequest, input GroupMembersInput) (*mcp.CallToolResult, GroupMembersOutput, error) {
+	fail := func(msg string) GroupMembersOutput {
+		return GroupMembersOutput{Success: false, Action: input.Action, Results: []ParticipantResult{}, Message: msg}
+	}
+	participants, err := parseParticipantJIDs(input.Participants)
+	if err != nil {
+		return nil, fail(err.Error()), nil
+	}
+	client, err := GetClient()
+	if err != nil {
+		return nil, fail(err.Error()), nil
+	}
+	results, group, err := client.UpdateGroupMembers(ctx, input.ChatJID, input.Action, participants)
+	if err != nil {
+		return nil, fail(err.Error()), nil
+	}
+	out := GroupMembersOutput{Success: true, Action: input.Action, Results: results}
+	if group != nil {
+		out.ParticipantCount = group.ParticipantCount
+	}
+	if failed := countFailed(results); failed > 0 {
+		out.Success = false
+		out.Message = fmt.Sprintf("%d of %d failed", failed, len(results))
+		if input.Action == "add" {
+			out.InviteLink = client.GetInviteLink(ctx, mustGroupJID(input.ChatJID))
+		}
+	}
+	return nil, out, nil
+}
+
+// UpdateGroupInput for metadata changes
+type UpdateGroupInput struct {
+	ChatJID string `json:"chat_jid"`        // required: group JID
+	Name    string `json:"name,omitempty"`  // new subject
+	Topic   string `json:"topic,omitempty"` // new description
+	Icon    string `json:"icon,omitempty"`  // image file path, or "none" to remove
+}
+
+// UpdateGroupOutput reports which fields changed
+type UpdateGroupOutput struct {
+	Success bool     `json:"success"`
+	JID     string   `json:"jid,omitempty"`
+	Name    string   `json:"name,omitempty"`
+	Topic   string   `json:"topic,omitempty"`
+	Changed []string `json:"changed"`
+	Message string   `json:"message,omitempty"`
+}
+
+// UpdateGroup changes a group's subject, description, or icon
+func UpdateGroup(ctx context.Context, req *mcp.CallToolRequest, input UpdateGroupInput) (*mcp.CallToolResult, UpdateGroupOutput, error) {
+	client, err := GetClient()
+	if err != nil {
+		return nil, UpdateGroupOutput{Changed: []string{}, Message: err.Error()}, nil
+	}
+	upd := GroupMetaUpdate{Name: input.Name, Topic: input.Topic, IconPath: input.Icon}
+	changed, group, err := client.UpdateGroupMeta(ctx, input.ChatJID, upd)
+	if changed == nil {
+		changed = []string{}
+	}
+	if err != nil {
+		return nil, UpdateGroupOutput{Changed: changed, Message: err.Error()}, nil
+	}
+	out := UpdateGroupOutput{Success: true, JID: input.ChatJID, Changed: changed}
+	if group != nil {
+		out.JID, out.Name, out.Topic = group.JID, group.Name, group.Topic
+	}
+	return nil, out, nil
+}
+
+func countFailed(results []ParticipantResult) int {
+	n := 0
+	for _, r := range results {
+		if !r.OK {
+			n++
+		}
+	}
+	return n
+}
+
+func mustGroupJID(jid string) types.JID {
+	parsed, _ := types.ParseJID(jid)
+	return parsed
 }
 
 // TCPPort is the port for TCP MCP connections (follows 205x convention)
