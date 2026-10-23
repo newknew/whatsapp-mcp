@@ -528,8 +528,8 @@ func registerTools(server *mcp.Server) {
 
 	server.AddTool(&mcp.Tool{
 		Name:        "whatsapp_send",
-		Description: "Send a WhatsApp message with optional media attachment. Use mode='new' for new messages (requires chat_jid), mode='reply' to reply (requires reply_to message_id). Use 'attachment' with a file path to send media. At least one of 'text' or 'attachment' required. Non-JPEG/PNG images are auto-converted to JPEG before sending. Text becomes caption when sent with media.",
-		InputSchema: json.RawMessage(`{"type":"object","properties":{"mode":{"description":"'new' or 'reply'"},"chat_jid":{"description":"Required for mode=new"},"text":{"description":"Message content"},"reply_to":{"description":"Message ID for mode=reply"},"mark_read":{"description":"Auto-mark as read after send (default true)"},"attachment":{"description":"File path to send as media"}},"required":["mode"]}`),
+		Description: "Send a WhatsApp message with optional media attachment. Use mode='new' for new messages (requires chat_jid), mode='reply' to reply (requires reply_to message_id). Use 'attachment' with a file path to send media. At least one of 'text' or 'attachment' required. Non-JPEG/PNG images are auto-converted to JPEG before sending. Text becomes caption when sent with media. To tag group members, write @<phone digits> in the text (e.g. '@33615741435') and list the same people in 'mentions'; the server converts them to real WhatsApp mentions and the result echoes who was tagged.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"mode":{"description":"'new' or 'reply'"},"chat_jid":{"description":"Required for mode=new"},"text":{"description":"Message content"},"reply_to":{"description":"Message ID for mode=reply"},"mark_read":{"description":"Auto-mark as read after send (default true)"},"attachment":{"description":"File path to send as media"},"mentions":{"description":"Comma-separated phone numbers or JIDs to tag; each must appear in text as @<digits>"}},"required":["mode"]}`),
 	}, flexTool(SendMessage))
 
 	mcp.AddTool(server, &mcp.Tool{
@@ -701,6 +701,9 @@ func ListChats(ctx context.Context, req *mcp.CallToolRequest, input ListChatsInp
 
 	// Merge any duplicate chat entries (handles legacy data)
 	chats = mergeAliasedChats(ctx, client, chats)
+	for i := range chats {
+		client.DecorateMentions(ctx, chats[i].Messages)
+	}
 
 	// Filter to pending only if requested
 	// Uses dismiss-based semantics: a chat is pending if last_message_time > user_handled_at
@@ -900,6 +903,7 @@ func GetMessages(ctx context.Context, req *mcp.CallToolRequest, input GetMessage
 	if messages == nil {
 		messages = []Message{}
 	}
+	client.DecorateMentions(ctx, messages)
 
 	// Get unread count if filtering by chat
 	var unreadCount int
@@ -1317,14 +1321,16 @@ type SendMessageInput struct {
 	ReplyTo    string  `json:"reply_to,omitempty"`   // message_id for mode=reply
 	MarkRead   *string `json:"mark_read,omitempty"`  // auto-mark chat as read after send (default: true)
 	Attachment string  `json:"attachment,omitempty"` // file path (optional)
+	Mentions   string  `json:"mentions,omitempty"`   // comma-separated phone numbers or JIDs tagged in text
 }
 
 // SendMessageOutput returns the sent message info
 type SendMessageOutput struct {
-	Success   bool   `json:"success"`
-	MessageID string `json:"message_id,omitempty"`
-	Timestamp string `json:"timestamp,omitempty"`
-	Message   string `json:"message,omitempty"`
+	Success   bool      `json:"success"`
+	MessageID string    `json:"message_id,omitempty"`
+	Timestamp string    `json:"timestamp,omitempty"`
+	Mentions  []Mention `json:"mentions,omitempty"` // participants actually tagged
+	Message   string    `json:"message,omitempty"`
 }
 
 // SendMessage sends a WhatsApp message (text and/or media)
@@ -1391,6 +1397,21 @@ func SendMessage(ctx context.Context, req *mcp.CallToolRequest, input SendMessag
 		return nil, SendMessageOutput{Success: false, Message: err.Error()}, nil
 	}
 
+	// Resolve @-mentions: rewrite text tokens and build the MentionedJID list
+	var mentionJIDs []string
+	var tagged []Mention
+	if strings.TrimSpace(input.Mentions) != "" {
+		jids, err := parseParticipantJIDs(input.Mentions)
+		if err != nil {
+			return nil, SendMessageOutput{Success: false, Message: "mentions: " + err.Error()}, nil
+		}
+		input.Text, mentionJIDs, err = applyMentions(input.Text, client.ResolveMentions(ctx, jids))
+		if err != nil {
+			return nil, SendMessageOutput{Success: false, Message: "mentions: " + err.Error()}, nil
+		}
+		tagged, _ = client.mentionDetails(ctx, mentionJIDs)
+	}
+
 	var result *SendResult
 
 	if input.Attachment != "" {
@@ -1437,13 +1458,13 @@ func SendMessage(ctx context.Context, req *mcp.CallToolRequest, input SendMessag
 			}, nil
 		}
 
-		result, err = client.SendMediaMessage(ctx, chatJID, data, mimeType, fileName, input.Text, replyTo)
+		result, err = client.SendMediaMessage(ctx, chatJID, data, mimeType, fileName, input.Text, replyTo, mentionJIDs)
 		if err != nil {
 			return nil, SendMessageOutput{Success: false, Message: err.Error()}, nil
 		}
 	} else {
 		// Text-only message
-		result, err = client.SendMessage(ctx, chatJID, input.Text, replyTo)
+		result, err = client.SendMessage(ctx, chatJID, input.Text, replyTo, mentionJIDs)
 		if err != nil {
 			return nil, SendMessageOutput{Success: false, Message: err.Error()}, nil
 		}
@@ -1462,6 +1483,7 @@ func SendMessage(ctx context.Context, req *mcp.CallToolRequest, input SendMessag
 		Success:   true,
 		MessageID: result.ID,
 		Timestamp: result.Timestamp.Format(time.RFC3339),
+		Mentions:  tagged,
 		Message:   "Message sent successfully",
 	}, nil
 }

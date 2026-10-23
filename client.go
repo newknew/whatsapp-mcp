@@ -710,8 +710,9 @@ func (c *Client) backfillLIDCanonicalJIDs() {
 }
 
 // SendMessage sends a text message to a chat
-// If replyTo is provided, the message is sent as a reply to that message
-func (c *Client) SendMessage(ctx context.Context, chatJID string, text string, replyTo string) (*SendResult, error) {
+// If replyTo is provided, the message is sent as a reply to that message.
+// mentions lists the JIDs tagged in text (see applyMentions).
+func (c *Client) SendMessage(ctx context.Context, chatJID string, text string, replyTo string, mentions []string) (*SendResult, error) {
 	if c.client == nil {
 		return nil, fmt.Errorf("client not connected")
 	}
@@ -725,15 +726,16 @@ func (c *Client) SendMessage(ctx context.Context, chatJID string, text string, r
 	// Build the message
 	var msg *waE2E.Message
 
-	if replyTo != "" {
-		// Reply to existing message - need to fetch the original message for context
+	if replyTo != "" || len(mentions) > 0 {
+		// Replies and mentions both live in ContextInfo
 		var quotedMsg *Message
-		if c.msgStore != nil {
+		if c.msgStore != nil && replyTo != "" {
 			quotedMsg, _ = c.msgStore.GetMessage(ctx, replyTo)
 		}
 
-		contextInfo := &waE2E.ContextInfo{
-			StanzaID: proto.String(replyTo),
+		contextInfo := &waE2E.ContextInfo{MentionedJID: mentions}
+		if replyTo != "" {
+			contextInfo.StanzaID = proto.String(replyTo)
 		}
 
 		// Set participant (sender of quoted message) for proper reply display
@@ -800,7 +802,7 @@ func (c *Client) SendMessage(ctx context.Context, chatJID string, text string, r
 // SendMediaMessage sends a media message (image, video, audio, or document) to a chat
 // mimeType determines the media type. caption is optional text shown with the media.
 // If replyTo is provided, the message is sent as a reply.
-func (c *Client) SendMediaMessage(ctx context.Context, chatJID string, data []byte, mimeType string, fileName string, caption string, replyTo string) (*SendResult, error) {
+func (c *Client) SendMediaMessage(ctx context.Context, chatJID string, data []byte, mimeType string, fileName string, caption string, replyTo string, mentions []string) (*SendResult, error) {
 	if c.client == nil {
 		return nil, fmt.Errorf("client not connected")
 	}
@@ -830,12 +832,16 @@ func (c *Client) SendMediaMessage(ctx context.Context, chatJID string, data []by
 		return nil, fmt.Errorf("upload failed: %w", err)
 	}
 
-	// Build context info for replies
+	// Build context info for replies and caption mentions
 	var contextInfo *waE2E.ContextInfo
+	if len(mentions) > 0 {
+		contextInfo = &waE2E.ContextInfo{MentionedJID: mentions}
+	}
 	if replyTo != "" {
-		contextInfo = &waE2E.ContextInfo{
-			StanzaID: proto.String(replyTo),
+		if contextInfo == nil {
+			contextInfo = &waE2E.ContextInfo{}
 		}
+		contextInfo.StanzaID = proto.String(replyTo)
 		if c.msgStore != nil {
 			if quotedMsg, _ := c.msgStore.GetMessage(ctx, replyTo); quotedMsg != nil {
 				contextInfo.Participant = proto.String(quotedMsg.SenderJID)

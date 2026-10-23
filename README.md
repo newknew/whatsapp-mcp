@@ -22,6 +22,8 @@ MCP server for WhatsApp messaging via [whatsmeow](https://github.com/tulir/whats
 - `whatsapp_update_group`: rename, set topic, set icon
 - Members blocked by privacy settings get an invite link
 - Live lookups are rate-limited by WhatsApp; cache fills in
+- `whatsapp_send` tags members via `mentions` + `@<digits>`
+- Messages carry `mentions`; content shows `@Name`
 
 ## Prerequisites
 

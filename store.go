@@ -51,8 +51,9 @@ type Message struct {
 	Content      string    `json:"content"`
 	Type         string    `json:"type"` // text, image, video, audio, document, etc.
 	IsFromMe     bool      `json:"is_from_me"`
-	PushName     string    `json:"push_name"` // sender's display name
-	RawProto     string    `json:"-"`         // JSON-serialized protobuf (not exposed in API)
+	PushName     string    `json:"push_name"`          // sender's display name
+	Mentions     []Mention `json:"mentions,omitempty"` // tagged participants, from ContextInfo
+	RawProto     string    `json:"-"`                  // JSON-serialized protobuf (not exposed in API)
 }
 
 // Chat represents a WhatsApp chat/conversation
@@ -713,12 +714,12 @@ func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, mess
 
 	query := `
 		WITH ranked AS (
-			SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name,
+			SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name, raw_proto,
 				ROW_NUMBER() OVER (PARTITION BY canonical_jid ORDER BY timestamp DESC) as rn
 			FROM messages
 			WHERE canonical_jid IN (` + strings.Join(placeholders, ",") + `)
 		)
-		SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name
+		SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name, raw_proto
 		FROM ranked
 		WHERE rn <= ?
 		ORDER BY canonical_jid, timestamp DESC
@@ -733,13 +734,14 @@ func (s *MessageStore) GetChatsWithMessages(ctx context.Context, limit int, mess
 	for msgRows.Next() {
 		var m Message
 		var ts int64
-		var pushName, canonicalJID sql.NullString
-		if err := msgRows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName); err != nil {
+		var pushName, canonicalJID, rawProto sql.NullString
+		if err := msgRows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName, &rawProto); err != nil {
 			return nil, fmt.Errorf("scan message: %w", err)
 		}
 		m.Timestamp = time.Unix(ts, 0)
 		m.PushName = pushName.String
 		m.CanonicalJID = canonicalJID.String
+		m.Mentions = mentionList(rawProto.String)
 
 		// Look up by canonical_jid
 		lookupJID := m.CanonicalJID
@@ -767,7 +769,7 @@ func (s *MessageStore) GetMessages(ctx context.Context, chatJID string, limit in
 	// Query by canonical_jid to get messages from all JID aliases
 	if beforeTime != nil {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name
+			SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name, raw_proto
 			FROM messages
 			WHERE canonical_jid = ? AND timestamp < ?
 			ORDER BY timestamp DESC
@@ -775,7 +777,7 @@ func (s *MessageStore) GetMessages(ctx context.Context, chatJID string, limit in
 		`, chatJID, beforeTime.Unix(), limit)
 	} else {
 		rows, err = s.db.QueryContext(ctx, `
-			SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name
+			SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name, raw_proto
 			FROM messages
 			WHERE canonical_jid = ?
 			ORDER BY timestamp DESC
@@ -792,13 +794,14 @@ func (s *MessageStore) GetMessages(ctx context.Context, chatJID string, limit in
 	for rows.Next() {
 		var m Message
 		var ts int64
-		var pushName, canonicalJID sql.NullString
-		if err := rows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName); err != nil {
+		var pushName, canonicalJID, rawProto sql.NullString
+		if err := rows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName, &rawProto); err != nil {
 			return nil, err
 		}
 		m.Timestamp = time.Unix(ts, 0)
 		m.PushName = pushName.String
 		m.CanonicalJID = canonicalJID.String
+		m.Mentions = mentionList(rawProto.String)
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
@@ -828,7 +831,7 @@ func (s *MessageStore) GetMessagesByJIDs(ctx context.Context, jids []string, lim
 	args = append(args, limit)
 
 	query := `
-		SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name
+		SELECT id, chat_jid, canonical_jid, sender_jid, timestamp, content, type, is_from_me, push_name, raw_proto
 		FROM messages
 		WHERE canonical_jid IN (` + strings.Join(placeholders, ",") + `)
 		   OR chat_jid IN (` + strings.Join(placeholders, ",") + `)
@@ -846,13 +849,14 @@ func (s *MessageStore) GetMessagesByJIDs(ctx context.Context, jids []string, lim
 	for rows.Next() {
 		var m Message
 		var ts int64
-		var pushName, canonicalJID sql.NullString
-		if err := rows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName); err != nil {
+		var pushName, canonicalJID, rawProto sql.NullString
+		if err := rows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName, &rawProto); err != nil {
 			return nil, err
 		}
 		m.Timestamp = time.Unix(ts, 0)
 		m.PushName = pushName.String
 		m.CanonicalJID = canonicalJID.String
+		m.Mentions = mentionList(rawProto.String)
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
@@ -862,12 +866,12 @@ func (s *MessageStore) GetMessagesByJIDs(ctx context.Context, jids []string, lim
 func (s *MessageStore) GetMessage(ctx context.Context, messageID string) (*Message, error) {
 	var m Message
 	var ts int64
-	var pushName sql.NullString
+	var pushName, rawProto sql.NullString
 
 	err := s.db.QueryRowContext(ctx, `
-		SELECT id, chat_jid, sender_jid, timestamp, content, type, is_from_me, push_name
+		SELECT id, chat_jid, sender_jid, timestamp, content, type, is_from_me, push_name, raw_proto
 		FROM messages WHERE id = ?
-	`, messageID).Scan(&m.ID, &m.ChatJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName)
+	`, messageID).Scan(&m.ID, &m.ChatJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName, &rawProto)
 
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -878,6 +882,7 @@ func (s *MessageStore) GetMessage(ctx context.Context, messageID string) (*Messa
 
 	m.Timestamp = time.Unix(ts, 0)
 	m.PushName = pushName.String
+	m.Mentions = mentionList(rawProto.String)
 	return &m, nil
 }
 
@@ -962,10 +967,10 @@ func (s *MessageStore) QueryMessages(ctx context.Context, q MessageQuery) ([]Mes
 	}
 
 	query := fmt.Sprintf(`
-		SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s
+		SELECT %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
 		FROM %s
 	`, col("id"), col("chat_jid"), col("canonical_jid"), col("sender_jid"),
-		col("timestamp"), col("content"), col("type"), col("is_from_me"), col("push_name"),
+		col("timestamp"), col("content"), col("type"), col("is_from_me"), col("push_name"), col("raw_proto"),
 		fromClause)
 	if len(conditions) > 0 {
 		query += " WHERE " + strings.Join(conditions, " AND ")
@@ -983,13 +988,14 @@ func (s *MessageStore) QueryMessages(ctx context.Context, q MessageQuery) ([]Mes
 	for rows.Next() {
 		var m Message
 		var ts int64
-		var pushName, canonicalJID sql.NullString
-		if err := rows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName); err != nil {
+		var pushName, canonicalJID, rawProto sql.NullString
+		if err := rows.Scan(&m.ID, &m.ChatJID, &canonicalJID, &m.SenderJID, &ts, &m.Content, &m.Type, &m.IsFromMe, &pushName, &rawProto); err != nil {
 			return nil, err
 		}
 		m.Timestamp = time.Unix(ts, 0)
 		m.PushName = pushName.String
 		m.CanonicalJID = canonicalJID.String
+		m.Mentions = mentionList(rawProto.String)
 		messages = append(messages, m)
 	}
 	return messages, rows.Err()
